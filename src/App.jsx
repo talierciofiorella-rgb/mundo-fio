@@ -1,7 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { supabase } from "./supabase";
 
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const DAYS = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 const FULL_DAYS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
 
@@ -30,7 +29,6 @@ const FALLBACK_MSGS = [
   "La versión de vos que querés ser ya existe. Solo la estás alcanzando.",
 ];
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
 const getWeekKey = () => {
   const now = new Date();
   const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
@@ -55,7 +53,6 @@ const defaultDay = () => ({
   mood: 3, gratitud:"", intencion:"", reflexion:"", tasks:[],
 });
 
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function PlannerFio() {
   const [view, setView] = useState("home");
   const [allData, setAllData] = useState({});
@@ -68,40 +65,29 @@ export default function PlannerFio() {
   const weekKey = getWeekKey();
   const todayIdx = getTodayIdx();
 
-  // ─── LOAD DATA FROM SUPABASE ───────────────────────────────────────────────
-  useEffect(() => {
-    loadAll();
-  }, []);
+  useEffect(() => { loadAll(); }, []);
 
   const loadAll = async () => {
     setLoading(true);
     try {
-      // Load planner days
       const { data: dias } = await supabase.from("planner_dias").select("*");
       if (dias) {
         const map = {};
         dias.forEach(r => { map[`${r.week_key}-${r.day_index}`] = r.data; });
         setAllData(map);
       }
-      // Load measures
       const { data: meds } = await supabase.from("medidas").select("*").order("fecha", { ascending: true });
       if (meds) setMeasuresState(meds);
-      // Load photo log
       const { data: fotos } = await supabase.from("fotos_log").select("*").limit(1);
       if (fotos && fotos.length > 0) setPhotoLog({ lastReminder: fotos[0].last_reminder, notes: fotos[0].notes || [] });
-      // Load motivation
       const today = todayStr();
       const { data: mot } = await supabase.from("motivacion").select("*").eq("fecha", today).limit(1);
-      if (mot && mot.length > 0) {
-        setMotivation({ date: today, msg: mot[0].msg });
-      } else {
-        fetchMotivation();
-      }
-    } catch (e) { console.error(e); }
+      if (mot && mot.length > 0) setMotivation({ date: today, msg: mot[0].msg });
+      else fetchMotivation();
+    } catch(e) { console.error(e); }
     setLoading(false);
   };
 
-  // ─── MOTIVATION ───────────────────────────────────────────────────────────
   const fetchMotivation = async () => {
     setAiLoading(true);
     try {
@@ -109,8 +95,7 @@ export default function PlannerFio() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 120,
+          model: "claude-sonnet-4-20250514", max_tokens: 120,
           messages: [{ role: "user", content: `Escribí UN mensaje motivacional corto (máximo 2 oraciones) en español rioplatense para Fio, una mujer argentina que está construyendo hábitos de movimiento y bienestar. Tiende a dejar las cosas a la mitad y necesita un empujón genuino, cálido y directo para seguir adelante HOY. No uses frases cliché. Hablale de vos. Solo el mensaje, nada más.` }]
         })
       });
@@ -120,42 +105,55 @@ export default function PlannerFio() {
       setMotivation({ date: today, msg });
       await supabase.from("motivacion").upsert({ fecha: today, msg }, { onConflict: "fecha" });
     } catch {
-      const msg = FALLBACK_MSGS[new Date().getDate() % FALLBACK_MSGS.length];
-      setMotivation({ date: todayStr(), msg });
+      setMotivation({ date: todayStr(), msg: FALLBACK_MSGS[new Date().getDate() % FALLBACK_MSGS.length] });
     }
     setAiLoading(false);
   };
 
-  // ─── DAY DATA ─────────────────────────────────────────────────────────────
-  const getDayData = (i) => allData[`${weekKey}-${i}`] || defaultDay();
+  const getDayData = useCallback((i) => allData[`${weekKey}-${i}`] || defaultDay(), [allData, weekKey]);
 
-  const updateDay = async (i, updater) => {
+  // Solo actualiza estado local, SIN guardar en Supabase
+  const updateDayLocal = (i, updater) => {
     const curr = getDayData(i);
     const updated = updater(curr);
-    const newAllData = { ...allData, [`${weekKey}-${i}`]: updated };
-    setAllData(newAllData);
+    setAllData(prev => ({ ...prev, [`${weekKey}-${i}`]: updated }));
+  };
+
+  // Guarda en Supabase — se llama solo al apretar el botón "Guardar día"
+  const saveDayToSupabase = async (i) => {
+    const curr = getDayData(i);
+    await supabase.from("planner_dias").upsert(
+      { week_key: weekKey, day_index: i, data: curr, updated_at: new Date().toISOString() },
+      { onConflict: "week_key,day_index" }
+    );
+  };
+
+  // Los checkboxes de inicio/entreno sí guardan inmediato (un solo click, no texto)
+  const updateDayAndSave = async (i, updater) => {
+    const curr = getDayData(i);
+    const updated = updater(curr);
+    setAllData(prev => ({ ...prev, [`${weekKey}-${i}`]: updated }));
     await supabase.from("planner_dias").upsert(
       { week_key: weekKey, day_index: i, data: updated, updated_at: new Date().toISOString() },
       { onConflict: "week_key,day_index" }
     );
   };
 
-  // ─── MEASURES ─────────────────────────────────────────────────────────────
   const saveMeasure = async (form, editingId) => {
     if (editingId) {
       const { data } = await supabase.from("medidas").update({
-        fecha: form.fecha, peso: form.peso || null, cintura: form.cintura || null,
-        cadera: form.cadera || null, bajo_vientre: form.bajo_vientre || null,
-        pierna_der: form.pierna_der || null, pierna_izq: form.pierna_izq || null, notas: form.notas || null
+        fecha:form.fecha, peso:form.peso||null, cintura:form.cintura||null,
+        cadera:form.cadera||null, bajo_vientre:form.bajo_vientre||null,
+        pierna_der:form.pierna_der||null, pierna_izq:form.pierna_izq||null, notas:form.notas||null
       }).eq("id", editingId).select();
-      if (data) setMeasuresState(prev => prev.map(m => m.id === editingId ? data[0] : m).sort((a,b) => a.fecha.localeCompare(b.fecha)));
+      if (data) setMeasuresState(prev => prev.map(m => m.id===editingId ? data[0] : m).sort((a,b)=>a.fecha.localeCompare(b.fecha)));
     } else {
       const { data } = await supabase.from("medidas").insert({
-        fecha: form.fecha, peso: form.peso || null, cintura: form.cintura || null,
-        cadera: form.cadera || null, bajo_vientre: form.bajo_vientre || null,
-        pierna_der: form.pierna_der || null, pierna_izq: form.pierna_izq || null, notas: form.notas || null
+        fecha:form.fecha, peso:form.peso||null, cintura:form.cintura||null,
+        cadera:form.cadera||null, bajo_vientre:form.bajo_vientre||null,
+        pierna_der:form.pierna_der||null, pierna_izq:form.pierna_izq||null, notas:form.notas||null
       }).select();
-      if (data) setMeasuresState(prev => [...prev, data[0]].sort((a,b) => a.fecha.localeCompare(b.fecha)));
+      if (data) setMeasuresState(prev => [...prev, data[0]].sort((a,b)=>a.fecha.localeCompare(b.fecha)));
     }
   };
 
@@ -164,14 +162,13 @@ export default function PlannerFio() {
     setMeasuresState(prev => prev.filter(m => m.id !== id));
   };
 
-  // ─── PHOTO LOG ────────────────────────────────────────────────────────────
   const savePhotoLog = async (obj) => {
     setPhotoLog(obj);
     const { data: existing } = await supabase.from("fotos_log").select("id").limit(1);
     if (existing && existing.length > 0) {
-      await supabase.from("fotos_log").update({ last_reminder: obj.lastReminder, notes: obj.notes, updated_at: new Date().toISOString() }).eq("id", existing[0].id);
+      await supabase.from("fotos_log").update({ last_reminder:obj.lastReminder, notes:obj.notes, updated_at:new Date().toISOString() }).eq("id", existing[0].id);
     } else {
-      await supabase.from("fotos_log").insert({ last_reminder: obj.lastReminder, notes: obj.notes });
+      await supabase.from("fotos_log").insert({ last_reminder:obj.lastReminder, notes:obj.notes });
     }
   };
 
@@ -198,10 +195,10 @@ export default function PlannerFio() {
 
   return (
     <div style={{ minHeight:"100vh", background:"#0d0b1a", fontFamily:"'Palatino Linotype', Palatino, serif", color:"#f0e6ff", paddingBottom:80 }}>
-      {view === "home" && <HomeView motivation={motivation} aiLoading={aiLoading} onRefresh={fetchMotivation} weekProgress={weekProgress} todayIdx={todayIdx} activeDay={activeDay} setActiveDay={setActiveDay} setView={setView} totalDaysActive={totalDaysActive} photosDue={photosDue} getDayData={getDayData} updateDay={updateDay} />}
-      {view === "planner" && <PlannerView activeDay={activeDay} setActiveDay={setActiveDay} todayIdx={todayIdx} weekProgress={weekProgress} getDayData={getDayData} updateDay={updateDay} setView={setView} />}
-      {view === "medidas" && <MedidasView measures={measures} saveMeasure={saveMeasure} deleteMeasure={deleteMeasure} setView={setView} />}
-      {view === "fotos" && <FotosView photoLog={photoLog} savePhotoLog={savePhotoLog} photosDue={photosDue} setView={setView} />}
+      {view==="home" && <HomeView motivation={motivation} aiLoading={aiLoading} onRefresh={fetchMotivation} weekProgress={weekProgress} todayIdx={todayIdx} activeDay={activeDay} setActiveDay={setActiveDay} setView={setView} totalDaysActive={totalDaysActive} photosDue={photosDue} getDayData={getDayData} updateDay={updateDayAndSave} />}
+      {view==="planner" && <PlannerView activeDay={activeDay} setActiveDay={setActiveDay} todayIdx={todayIdx} weekProgress={weekProgress} getDayData={getDayData} updateDayLocal={updateDayLocal} updateDayAndSave={updateDayAndSave} saveDayToSupabase={saveDayToSupabase} setView={setView} weekKey={weekKey} />}
+      {view==="medidas" && <MedidasView measures={measures} saveMeasure={saveMeasure} deleteMeasure={deleteMeasure} setView={setView} />}
+      {view==="fotos" && <FotosView photoLog={photoLog} savePhotoLog={savePhotoLog} photosDue={photosDue} setView={setView} />}
       <BottomNav view={view} setView={setView} photosDue={photosDue} />
     </div>
   );
@@ -286,20 +283,33 @@ function QuickCheck({ emoji, label, done, onToggle }) {
 }
 
 // ─── PLANNER ──────────────────────────────────────────────────────────────────
-function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayData, updateDay, setView }) {
+function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayData, updateDayLocal, updateDayAndSave, saveDayToSupabase, setView }) {
   const [tab, setTab] = useState("entreno");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const day = getDayData(activeDay);
   const sched = TRAINING_SCHEDULE[activeDay];
   const [newTask, setNewTask] = useState("");
 
-  const setTraining = (f,v) => updateDay(activeDay, d => ({...d, training:{...d.training,[f]:v}}));
-  const setFood = (f,v) => updateDay(activeDay, d => ({...d, food:{...d.food,[f]:v}}));
-  const setBlock = (b,f,v) => updateDay(activeDay, d => ({...d, blocks:{...d.blocks,[b]:{...d.blocks[b],[f]:v}}}));
-  const setField = (f,v) => updateDay(activeDay, d => ({...d,[f]:v}));
+  const setTraining = (f,v) => updateDayAndSave(activeDay, d => ({...d, training:{...d.training,[f]:v}}));
+  const setFood = (f,v) => updateDayLocal(activeDay, d => ({...d, food:{...d.food,[f]:v}}));
+  const setBlock = (b,f,v) => {
+    if (f === "done") updateDayAndSave(activeDay, d => ({...d, blocks:{...d.blocks,[b]:{...d.blocks[b],[f]:v}}}));
+    else updateDayLocal(activeDay, d => ({...d, blocks:{...d.blocks,[b]:{...d.blocks[b],[f]:v}}}));
+  };
+  const setField = (f,v) => updateDayLocal(activeDay, d => ({...d,[f]:v}));
   const addTask = () => {
     if (!newTask.trim()) return;
-    updateDay(activeDay, d => ({...d, tasks:[...d.tasks, {text:newTask.trim(), done:false, id:Date.now()}]}));
+    updateDayAndSave(activeDay, d => ({...d, tasks:[...d.tasks, {text:newTask.trim(), done:false, id:Date.now()}]}));
     setNewTask("");
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    await saveDayToSupabase(activeDay);
+    setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 3000);
   };
 
   const tabs = [{id:"entreno",label:"🏋️ Entreno"},{id:"comida",label:"🥗 Comida"},{id:"bloques",label:"📚 Bloques"},{id:"tareas",label:"✅ Tareas"},{id:"alma",label:"🌸 Alma"}];
@@ -308,7 +318,11 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
     <div>
       <div style={{ padding:"24px 16px 12px", display:"flex", alignItems:"center", gap:12 }}>
         <button onClick={() => setView("home")} style={{ background:"none", border:"none", color:"#a78bfa", fontSize:20, cursor:"pointer" }}>←</button>
-        <h2 style={{ margin:0, fontSize:22, color:"#f0e6ff" }}>Planner</h2>
+        <h2 style={{ margin:0, fontSize:22, color:"#f0e6ff", flex:1 }}>Planner</h2>
+        {/* Botón guardar siempre visible en el header */}
+        <button onClick={handleSave} disabled={saving} style={{ padding:"8px 16px", borderRadius:10, background:saved?"rgba(74,222,128,0.2)":"linear-gradient(135deg,#7c3aed,#ec4899)", border:saved?"1px solid #4ade80":"none", color:saved?"#4ade80":"white", fontSize:12, fontWeight:700, cursor:"pointer", opacity:saving?0.7:1, transition:"all 0.3s" }}>
+          {saving?"Guardando...":saved?"✓ Guardado":"💾 Guardar día"}
+        </button>
       </div>
       <div style={{ padding:"0 12px 12px", display:"flex", gap:6 }}>
         {DAYS.map((d,i) => (
@@ -332,9 +346,9 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
           <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
             {!sched.fuerza && !sched.cardio && !sched.yoga
               ? <div style={{ textAlign:"center", padding:"40px 0", color:"#7c3aed" }}>🌙 Día de descanso activo.</div>
-              : <>{sched.fuerza && <TrainingCard emoji="🏋️" label="Fuerza" done={day.training.fuerzaDone} notes={day.training.fuerzaNotes} onToggle={() => setTraining("fuerzaDone",!day.training.fuerzaDone)} onNotes={v => setTraining("fuerzaNotes",v)} color="#c084fc" />}
-                {sched.cardio && <TrainingCard emoji="🏃" label="Cardio" done={day.training.cardioDone} notes={day.training.cardioNotes} onToggle={() => setTraining("cardioDone",!day.training.cardioDone)} onNotes={v => setTraining("cardioNotes",v)} color="#f472b6" />}
-                {sched.yoga && <TrainingCard emoji="🧘" label="Yoga" done={day.training.yogaDone} notes={day.training.yogaNotes} onToggle={() => setTraining("yogaDone",!day.training.yogaDone)} onNotes={v => setTraining("yogaNotes",v)} color="#818cf8" />}</>
+              : <>{sched.fuerza && <TrainingCard emoji="🏋️" label="Fuerza" done={day.training.fuerzaDone} notes={day.training.fuerzaNotes} onToggle={() => setTraining("fuerzaDone",!day.training.fuerzaDone)} onNotes={v => updateDayLocal(activeDay, d => ({...d, training:{...d.training,fuerzaNotes:v}}))} color="#c084fc" />}
+                {sched.cardio && <TrainingCard emoji="🏃" label="Cardio" done={day.training.cardioDone} notes={day.training.cardioNotes} onToggle={() => setTraining("cardioDone",!day.training.cardioDone)} onNotes={v => updateDayLocal(activeDay, d => ({...d, training:{...d.training,cardioNotes:v}}))} color="#f472b6" />}
+                {sched.yoga && <TrainingCard emoji="🧘" label="Yoga" done={day.training.yogaDone} notes={day.training.yogaNotes} onToggle={() => setTraining("yogaDone",!day.training.yogaDone)} onNotes={v => updateDayLocal(activeDay, d => ({...d, training:{...d.training,yogaNotes:v}}))} color="#818cf8" />}</>
             }
           </div>
         )}
@@ -343,7 +357,7 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
             {[{f:"desayuno",l:"Desayuno",e:"☀️"},{f:"almuerzo",l:"Almuerzo",e:"🥗"},{f:"merienda",l:"Merienda",e:"🍎"},{f:"cena",l:"Cena",e:"🌙"}].map(({f,l,e}) => (
               <Card key={f}><div style={{ fontSize:13, color:"#a78bfa", marginBottom:8, fontWeight:600 }}>{e} {l}</div><Textarea value={day.food[f]} onChange={v => setFood(f,v)} placeholder="¿Qué comiste?" /></Card>
             ))}
-            <WaterTracker agua={day.food.agua} setAgua={v => setFood("agua",v)} />
+            <WaterTracker agua={day.food.agua} setAgua={v => updateDayAndSave(activeDay, d => ({...d, food:{...d.food,agua:v}}))} />
           </div>
         )}
         {tab==="bloques" && (
@@ -360,12 +374,12 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
               <input value={newTask} onChange={e => setNewTask(e.target.value)} onKeyDown={e => e.key==="Enter" && addTask()} placeholder="Nueva tarea..." style={{ flex:1, background:"rgba(255,255,255,0.06)", border:"1px solid rgba(200,160,255,0.2)", borderRadius:8, padding:"8px 12px", color:"#f0e6ff", fontSize:13, outline:"none" }} />
               <button onClick={addTask} style={{ background:"#7c3aed", border:"none", borderRadius:8, padding:"8px 14px", color:"white", cursor:"pointer", fontSize:16 }}>+</button>
             </div>
-            {day.tasks.length === 0 && <div style={{ color:"#6d28d9", fontSize:13, textAlign:"center", padding:"16px 0" }}>¡Todo limpio! ✨</div>}
+            {day.tasks.length===0 && <div style={{ color:"#6d28d9", fontSize:13, textAlign:"center", padding:"16px 0" }}>¡Todo limpio! ✨</div>}
             {day.tasks.map(t => (
               <div key={t.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 0", borderBottom:"1px solid rgba(255,255,255,0.05)" }}>
-                <button onClick={() => updateDay(activeDay, d => ({...d, tasks:d.tasks.map(x => x.id===t.id?{...x,done:!x.done}:x)}))} style={{ width:20, height:20, borderRadius:"50%", border:`2px solid ${t.done?"#4ade80":"#7c3aed"}`, background:t.done?"#4ade80":"transparent", cursor:"pointer", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11 }}>{t.done?"✓":""}</button>
+                <button onClick={() => updateDayAndSave(activeDay, d => ({...d, tasks:d.tasks.map(x => x.id===t.id?{...x,done:!x.done}:x)}))} style={{ width:20, height:20, borderRadius:"50%", border:`2px solid ${t.done?"#4ade80":"#7c3aed"}`, background:t.done?"#4ade80":"transparent", cursor:"pointer", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11 }}>{t.done?"✓":""}</button>
                 <span style={{ flex:1, fontSize:13, color:t.done?"#6d28d9":"#e9d5ff", textDecoration:t.done?"line-through":"none" }}>{t.text}</span>
-                <button onClick={() => updateDay(activeDay, d => ({...d, tasks:d.tasks.filter(x=>x.id!==t.id)}))} style={{ background:"none", border:"none", color:"#6d28d9", cursor:"pointer", fontSize:14 }}>✕</button>
+                <button onClick={() => updateDayAndSave(activeDay, d => ({...d, tasks:d.tasks.filter(x=>x.id!==t.id)}))} style={{ background:"none", border:"none", color:"#6d28d9", cursor:"pointer", fontSize:14 }}>✕</button>
               </div>
             ))}
           </Card>
@@ -376,7 +390,7 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
               <div style={{ fontSize:13, color:"#f472b6", marginBottom:12, fontWeight:600 }}>🌡️ ¿Cómo estás hoy?</div>
               <div style={{ display:"flex", justifyContent:"space-around" }}>
                 {["😔","😕","😐","🙂","🌟"].map((m,i) => (
-                  <button key={i} onClick={() => setField("mood",i+1)} style={{ fontSize:28, background:"none", border:`2px solid ${day.mood===i+1?"#f472b6":"transparent"}`, borderRadius:"50%", padding:6, cursor:"pointer", transform:day.mood===i+1?"scale(1.2)":"scale(1)", transition:"all 0.2s" }}>{m}</button>
+                  <button key={i} onClick={() => updateDayAndSave(activeDay, d => ({...d,mood:i+1}))} style={{ fontSize:28, background:"none", border:`2px solid ${day.mood===i+1?"#f472b6":"transparent"}`, borderRadius:"50%", padding:6, cursor:"pointer", transform:day.mood===i+1?"scale(1.2)":"scale(1)", transition:"all 0.2s" }}>{m}</button>
                 ))}
               </div>
             </Card>
@@ -385,6 +399,13 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
             ))}
           </div>
         )}
+
+        {/* BOTÓN GUARDAR al pie de cada tab */}
+        <div style={{ marginTop:16, marginBottom:8 }}>
+          <button onClick={handleSave} disabled={saving} style={{ width:"100%", padding:"14px", borderRadius:14, background:saved?"rgba(74,222,128,0.15)":"linear-gradient(135deg,#7c3aed,#ec4899)", border:saved?"1px solid #4ade80":"none", color:saved?"#4ade80":"white", fontSize:14, fontWeight:700, cursor:"pointer", opacity:saving?0.7:1, transition:"all 0.3s" }}>
+            {saving?"Guardando...":saved?"✓ ¡Día guardado!":"💾 Guardar día"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -414,7 +435,6 @@ function MedidasView({ measures, saveMeasure, deleteMeasure, setView }) {
     setEditingId(m.id); setShowForm(true); setConfirmDelete(null);
   };
   const cancelForm = () => { setShowForm(false); setEditingId(null); setForm(emptyForm); };
-
   const handleSave = async () => {
     if (!fields.some(f => form[f.k])) return;
     setSaving(true);
@@ -448,20 +468,20 @@ function MedidasView({ measures, saveMeasure, deleteMeasure, setView }) {
               <defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#c084fc" stopOpacity="0.3"/><stop offset="100%" stopColor="#c084fc" stopOpacity="0"/></linearGradient></defs>
               {chartData.length > 1 && (() => {
                 const pts = chartData.map((d,i) => { const x=10+(i/(chartData.length-1))*280; const y=85-((d.val-minVal)/range)*70; return `${x},${y}`; });
-                const ptsStr = pts.join(" "); const firstX=pts[0].split(",")[0]; const lastX=pts[pts.length-1].split(",")[0];
+                const ptsStr=pts.join(" "); const firstX=pts[0].split(",")[0]; const lastX=pts[pts.length-1].split(",")[0];
                 return (<><path d={`M ${ptsStr}`} fill="none" stroke="#c084fc" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d={`M ${pts[0]} L ${ptsStr} L ${lastX},90 L ${firstX},90 Z`} fill="url(#grad)"/>{chartData.map((d,i) => { const x=10+(i/(chartData.length-1))*280; const y=85-((d.val-minVal)/range)*70; return <circle key={i} cx={x} cy={y} r="3" fill="#c084fc"/>; })}</>);
               })()}
             </svg>
             <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"#6d28d9", marginTop:4 }}>
-              {chartData[0] && <span>{chartData[0].date}</span>}{chartData.length > 1 && <span>{chartData[chartData.length-1].date}</span>}
+              {chartData[0] && <span>{chartData[0].date}</span>}{chartData.length>1 && <span>{chartData[chartData.length-1].date}</span>}
             </div>
-            {chartData.length >= 2 && (() => { const first=chartData[0].val, last=chartData[chartData.length-1].val, diff=last-first; return <div style={{ marginTop:8, fontSize:12, color:diff<0?"#4ade80":diff>0?"#f472b6":"#a78bfa", textAlign:"center" }}>{diff===0?"Sin cambios aún — la constancia se acumula.":diff<0?`↓ ${Math.abs(diff).toFixed(1)} menos desde el inicio 💪`:`↑ ${diff.toFixed(1)} desde el inicio`}</div>; })()}
+            {chartData.length>=2 && (() => { const first=chartData[0].val,last=chartData[chartData.length-1].val,diff=last-first; return <div style={{ marginTop:8, fontSize:12, color:diff<0?"#4ade80":diff>0?"#f472b6":"#a78bfa", textAlign:"center" }}>{diff===0?"Sin cambios aún — la constancia se acumula.":diff<0?`↓ ${Math.abs(diff).toFixed(1)} menos desde el inicio 💪`:`↑ ${diff.toFixed(1)} desde el inicio`}</div>; })()}
           </Card>
         )}
         {!showForm
           ? <button onClick={() => { setShowForm(true); setEditingId(null); setForm(emptyForm); }} style={{ width:"100%", padding:"14px", borderRadius:14, margin:"0 0 12px", background:"rgba(124,58,237,0.2)", border:"1px solid rgba(124,58,237,0.4)", color:"#c084fc", fontSize:14, cursor:"pointer", fontWeight:600 }}>+ Registrar medidas de hoy</button>
           : <Card>
-              <div style={{ fontSize:13, color:"#c084fc", fontWeight:600, marginBottom:12 }}>{editingId ? "✏️ Editando registro" : "📝 Nuevo registro"}</div>
+              <div style={{ fontSize:13, color:"#c084fc", fontWeight:600, marginBottom:12 }}>{editingId?"✏️ Editando registro":"📝 Nuevo registro"}</div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                 {fields.map(({k,l,u,e}) => (
                   <div key={k}>
@@ -493,7 +513,7 @@ function MedidasView({ measures, saveMeasure, deleteMeasure, setView }) {
                     <button onClick={() => setConfirmDelete(m.id)} style={{ background:"rgba(244,63,94,0.1)", border:"1px solid rgba(244,63,94,0.25)", borderRadius:8, padding:"4px 10px", color:"#fb7185", fontSize:11, cursor:"pointer" }}>🗑️ Borrar</button>
                   </div>
                 </div>
-                {confirmDelete === m.id && (
+                {confirmDelete===m.id && (
                   <div style={{ background:"rgba(244,63,94,0.1)", border:"1px solid rgba(244,63,94,0.3)", borderRadius:10, padding:"10px 12px", marginBottom:8, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
                     <span style={{ fontSize:12, color:"#fda4af" }}>¿Segura que querés borrar?</span>
                     <div style={{ display:"flex", gap:6, flexShrink:0 }}>
@@ -568,7 +588,7 @@ function FotosView({ photoLog, savePhotoLog, photosDue, setView }) {
             <input value={newNote} onChange={e => setNewNote(e.target.value)} onKeyDown={e => e.key==="Enter" && addNote()} placeholder="Escribir observación..." style={{ flex:1, background:"rgba(255,255,255,0.06)", border:"1px solid rgba(200,160,255,0.2)", borderRadius:8, padding:"8px 12px", color:"#f0e6ff", fontSize:13, outline:"none" }} />
             <button onClick={addNote} style={{ background:"#7c3aed", border:"none", borderRadius:8, padding:"8px 14px", color:"white", cursor:"pointer" }}>+</button>
           </div>
-          {(photoLog.notes||[]).length === 0 && <div style={{ color:"#6d28d9", fontSize:12, textAlign:"center", padding:"12px 0" }}>Tus reflexiones van a aparecer acá.</div>}
+          {(photoLog.notes||[]).length===0 && <div style={{ color:"#6d28d9", fontSize:12, textAlign:"center", padding:"12px 0" }}>Tus reflexiones van a aparecer acá.</div>}
           {[...(photoLog.notes||[])].reverse().map(n => (
             <div key={n.id} style={{ padding:"10px 0", borderBottom:"1px solid rgba(255,255,255,0.05)" }}>
               <div style={{ fontSize:11, color:"#6d28d9", marginBottom:3 }}>{fmtDate(n.date)}</div>
