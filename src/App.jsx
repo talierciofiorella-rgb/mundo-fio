@@ -661,23 +661,14 @@ function MedidasView({measures,saveMeasure,deleteMeasure,setView}) {
           ?<button onClick={()=>{setShowForm(true);setEditingId(null);setForm(emptyForm);}} style={{width:"100%",padding:"14px",borderRadius:14,margin:"0 0 12px",background:"rgba(124,58,237,0.2)",border:"1px solid rgba(124,58,237,0.4)",color:"#c084fc",fontSize:14,cursor:"pointer",fontWeight:600}}>+ Registrar medidas de hoy</button>
           :<Card>
             <div style={{fontSize:13,color:"#c084fc",fontWeight:600,marginBottom:12}}>{editingId?"✏️ Editando":"📝 Nuevo registro"}</div>
-<div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-  {[...(photoLog.photos||[])].reverse().map(p=>(
-    <div key={p.id} style={{aspectRatio:"1",borderRadius:10,overflow:"hidden",position:"relative"}}>
-      <img src={p.url} alt="progreso" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-      <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,0,0,0.5)",padding:"3px",fontSize:8,color:"white",textAlign:"center"}}>{fmtDate(p.date)}</div>
-      <button
-        onClick={async()=>{
-          const fileName = p.url.split("/").pop();
-          await supabase.storage.from("fotos-progreso").remove([fileName]);
-          const updatedPhotos = (photoLog.photos||[]).filter(x=>x.id!==p.id);
-          savePhotoLog({...photoLog, photos:updatedPhotos});
-        }}
-        style={{position:"absolute",top:4,right:4,background:"rgba(190,18,60,0.85)",border:"none",borderRadius:"50%",width:22,height:22,color:"white",fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}
-      >✕</button>
-    </div>
-  ))}
-</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {allFields.map(({k,l,u,e})=>(
+                <div key={k}>
+                  <div style={{fontSize:11,color:"#a78bfa",marginBottom:4}}>{e} {l} <span style={{color:"#6d28d9"}}>({u})</span></div>
+                  <input type="number" value={form[k]} onChange={ev=>setForm(f=>({...f,[k]:ev.target.value}))} placeholder="—" style={{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(200,160,255,0.2)",borderRadius:8,padding:"8px 10px",color:"#f0e6ff",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+              ))}
+            </div>
             <div style={{marginTop:8}}>
               <div style={{fontSize:11,color:"#a78bfa",marginBottom:4}}>📅 Fecha</div>
               <input type="date" value={form.fecha} onChange={ev=>setForm(f=>({...f,fecha:ev.target.value}))} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(200,160,255,0.2)",borderRadius:8,padding:"8px 10px",color:"#f0e6ff",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
@@ -806,6 +797,7 @@ function FotosView({photoLog,savePhotoLog,reminderDue,setView}) {
                 <div key={p.id} style={{aspectRatio:"1",borderRadius:10,overflow:"hidden",position:"relative"}}>
                   <img src={p.url} alt="progreso" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
                   <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,0,0,0.5)",padding:"3px",fontSize:8,color:"white",textAlign:"center"}}>{fmtDate(p.date)}</div>
+                  <button onClick={async()=>{const fileName=p.url.split("/").pop();await supabase.storage.from("fotos-progreso").remove([fileName]);const updatedPhotos=(photoLog.photos||[]).filter(x=>x.id!==p.id);savePhotoLog({...photoLog,photos:updatedPhotos});}} style={{position:"absolute",top:4,right:4,background:"rgba(190,18,60,0.9)",border:"none",borderRadius:"50%",width:24,height:24,color:"white",fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,lineHeight:1}}>✕</button>
                 </div>
               ))}
             </div>
