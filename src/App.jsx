@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
+import { supabase } from "./supabase";
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const DAYS = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
@@ -14,11 +15,6 @@ const TRAINING_SCHEDULE = {
   6:{fuerza:false,cardio:false,yoga:true},
 };
 
-const STORAGE_KEY = "fio_planner_v2";
-const MEASURES_KEY = "fio_measures_v1";
-const PHOTOS_KEY = "fio_photos_v1";
-const MOTIVATION_KEY = "fio_motivation_v1";
-
 const FALLBACK_MSGS = [
   "Fio, hoy te levantaste. Eso ya es un sí. El resto viene solo.",
   "La pereza miente. Te dice que mañana. Vos sabés que hoy.",
@@ -33,15 +29,6 @@ const FALLBACK_MSGS = [
   "El progreso no siempre se ve. Pero siempre está pasando.",
   "La versión de vos que querés ser ya existe. Solo la estás alcanzando.",
 ];
-
-// ─── STORAGE ──────────────────────────────────────────────────────────────────
-const load = (key, def) => {
-  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : def; }
-  catch { return def; }
-};
-const save = (key, val) => {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-};
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const getWeekKey = () => {
@@ -71,21 +58,50 @@ const defaultDay = () => ({
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function PlannerFio() {
   const [view, setView] = useState("home");
-  const [allData, setAllData] = useState(() => load(STORAGE_KEY, {}));
-  const [measures, setMeasuresState] = useState(() => load(MEASURES_KEY, []));
-  const [photoLog, setPhotoLog] = useState(() => load(PHOTOS_KEY, { lastReminder: null, notes: [] }));
-  const [motivation, setMotivation] = useState(() => load(MOTIVATION_KEY, { date: null, msg: null }));
+  const [allData, setAllData] = useState({});
+  const [measures, setMeasuresState] = useState([]);
+  const [photoLog, setPhotoLog] = useState({ lastReminder: null, notes: [] });
+  const [motivation, setMotivation] = useState({ date: null, msg: null });
   const [aiLoading, setAiLoading] = useState(false);
   const [activeDay, setActiveDay] = useState(getTodayIdx());
+  const [loading, setLoading] = useState(true);
   const weekKey = getWeekKey();
   const todayIdx = getTodayIdx();
 
+  // ─── LOAD DATA FROM SUPABASE ───────────────────────────────────────────────
   useEffect(() => {
-    const today = todayStr();
-    if (motivation.date === today && motivation.msg) return;
-    fetchMotivation();
+    loadAll();
   }, []);
 
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      // Load planner days
+      const { data: dias } = await supabase.from("planner_dias").select("*");
+      if (dias) {
+        const map = {};
+        dias.forEach(r => { map[`${r.week_key}-${r.day_index}`] = r.data; });
+        setAllData(map);
+      }
+      // Load measures
+      const { data: meds } = await supabase.from("medidas").select("*").order("fecha", { ascending: true });
+      if (meds) setMeasuresState(meds);
+      // Load photo log
+      const { data: fotos } = await supabase.from("fotos_log").select("*").limit(1);
+      if (fotos && fotos.length > 0) setPhotoLog({ lastReminder: fotos[0].last_reminder, notes: fotos[0].notes || [] });
+      // Load motivation
+      const today = todayStr();
+      const { data: mot } = await supabase.from("motivacion").select("*").eq("fecha", today).limit(1);
+      if (mot && mot.length > 0) {
+        setMotivation({ date: today, msg: mot[0].msg });
+      } else {
+        fetchMotivation();
+      }
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  };
+
+  // ─── MOTIVATION ───────────────────────────────────────────────────────────
   const fetchMotivation = async () => {
     setAiLoading(true);
     try {
@@ -95,37 +111,69 @@ export default function PlannerFio() {
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 120,
-          messages: [{
-            role: "user",
-            content: `Escribí UN mensaje motivacional corto (máximo 2 oraciones) en español rioplatense para Fio, una mujer argentina que está construyendo hábitos de movimiento y bienestar. Tiende a dejar las cosas a la mitad y necesita un empujón genuino, cálido y directo para seguir adelante HOY. No uses frases cliché. Hablale de vos. Solo el mensaje, nada más.`
-          }]
+          messages: [{ role: "user", content: `Escribí UN mensaje motivacional corto (máximo 2 oraciones) en español rioplatense para Fio, una mujer argentina que está construyendo hábitos de movimiento y bienestar. Tiende a dejar las cosas a la mitad y necesita un empujón genuino, cálido y directo para seguir adelante HOY. No uses frases cliché. Hablale de vos. Solo el mensaje, nada más.` }]
         })
       });
       const data = await resp.json();
       const msg = data?.content?.[0]?.text?.trim() || FALLBACK_MSGS[new Date().getDate() % FALLBACK_MSGS.length];
-      const newMot = { date: todayStr(), msg };
-      setMotivation(newMot);
-      save(MOTIVATION_KEY, newMot);
+      const today = todayStr();
+      setMotivation({ date: today, msg });
+      await supabase.from("motivacion").upsert({ fecha: today, msg }, { onConflict: "fecha" });
     } catch {
       const msg = FALLBACK_MSGS[new Date().getDate() % FALLBACK_MSGS.length];
-      const newMot = { date: todayStr(), msg };
-      setMotivation(newMot);
-      save(MOTIVATION_KEY, newMot);
+      setMotivation({ date: todayStr(), msg });
     }
     setAiLoading(false);
   };
 
+  // ─── DAY DATA ─────────────────────────────────────────────────────────────
   const getDayData = (i) => allData[`${weekKey}-${i}`] || defaultDay();
-  const updateDay = (i, updater) => {
-    const key = `${weekKey}-${i}`;
+
+  const updateDay = async (i, updater) => {
     const curr = getDayData(i);
     const updated = updater(curr);
-    const nd = { ...allData, [key]: updated };
-    setAllData(nd); save(STORAGE_KEY, nd);
+    const newAllData = { ...allData, [`${weekKey}-${i}`]: updated };
+    setAllData(newAllData);
+    await supabase.from("planner_dias").upsert(
+      { week_key: weekKey, day_index: i, data: updated, updated_at: new Date().toISOString() },
+      { onConflict: "week_key,day_index" }
+    );
   };
 
-  const saveMeasures = (arr) => { setMeasuresState(arr); save(MEASURES_KEY, arr); };
-  const savePhotoLog = (obj) => { setPhotoLog(obj); save(PHOTOS_KEY, obj); };
+  // ─── MEASURES ─────────────────────────────────────────────────────────────
+  const saveMeasure = async (form, editingId) => {
+    if (editingId) {
+      const { data } = await supabase.from("medidas").update({
+        fecha: form.fecha, peso: form.peso || null, cintura: form.cintura || null,
+        cadera: form.cadera || null, bajo_vientre: form.bajo_vientre || null,
+        pierna_der: form.pierna_der || null, pierna_izq: form.pierna_izq || null, notas: form.notas || null
+      }).eq("id", editingId).select();
+      if (data) setMeasuresState(prev => prev.map(m => m.id === editingId ? data[0] : m).sort((a,b) => a.fecha.localeCompare(b.fecha)));
+    } else {
+      const { data } = await supabase.from("medidas").insert({
+        fecha: form.fecha, peso: form.peso || null, cintura: form.cintura || null,
+        cadera: form.cadera || null, bajo_vientre: form.bajo_vientre || null,
+        pierna_der: form.pierna_der || null, pierna_izq: form.pierna_izq || null, notas: form.notas || null
+      }).select();
+      if (data) setMeasuresState(prev => [...prev, data[0]].sort((a,b) => a.fecha.localeCompare(b.fecha)));
+    }
+  };
+
+  const deleteMeasure = async (id) => {
+    await supabase.from("medidas").delete().eq("id", id);
+    setMeasuresState(prev => prev.filter(m => m.id !== id));
+  };
+
+  // ─── PHOTO LOG ────────────────────────────────────────────────────────────
+  const savePhotoLog = async (obj) => {
+    setPhotoLog(obj);
+    const { data: existing } = await supabase.from("fotos_log").select("id").limit(1);
+    if (existing && existing.length > 0) {
+      await supabase.from("fotos_log").update({ last_reminder: obj.lastReminder, notes: obj.notes, updated_at: new Date().toISOString() }).eq("id", existing[0].id);
+    } else {
+      await supabase.from("fotos_log").insert({ last_reminder: obj.lastReminder, notes: obj.notes });
+    }
+  };
 
   const weekProgress = DAYS.map((_, i) => {
     const d = getDayData(i); const s = TRAINING_SCHEDULE[i];
@@ -141,11 +189,18 @@ export default function PlannerFio() {
   const totalDaysActive = Object.keys(allData).length;
   const photosDue = !photoLog.lastReminder || daysBetween(photoLog.lastReminder, todayStr()) >= 15;
 
+  if (loading) return (
+    <div style={{ minHeight:"100vh", background:"#0d0b1a", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:16 }}>
+      <div style={{ fontSize:32 }}>✨</div>
+      <div style={{ color:"#c084fc", fontSize:14, fontFamily:"Palatino, serif" }}>Cargando Mundo Fio...</div>
+    </div>
+  );
+
   return (
     <div style={{ minHeight:"100vh", background:"#0d0b1a", fontFamily:"'Palatino Linotype', Palatino, serif", color:"#f0e6ff", paddingBottom:80 }}>
       {view === "home" && <HomeView motivation={motivation} aiLoading={aiLoading} onRefresh={fetchMotivation} weekProgress={weekProgress} todayIdx={todayIdx} activeDay={activeDay} setActiveDay={setActiveDay} setView={setView} totalDaysActive={totalDaysActive} photosDue={photosDue} getDayData={getDayData} updateDay={updateDay} />}
       {view === "planner" && <PlannerView activeDay={activeDay} setActiveDay={setActiveDay} todayIdx={todayIdx} weekProgress={weekProgress} getDayData={getDayData} updateDay={updateDay} setView={setView} />}
-      {view === "medidas" && <MedidasView measures={measures} saveMeasures={saveMeasures} setView={setView} />}
+      {view === "medidas" && <MedidasView measures={measures} saveMeasure={saveMeasure} deleteMeasure={deleteMeasure} setView={setView} />}
       {view === "fotos" && <FotosView photoLog={photoLog} savePhotoLog={savePhotoLog} photosDue={photosDue} setView={setView} />}
       <BottomNav view={view} setView={setView} photosDue={photosDue} />
     </div>
@@ -156,7 +211,6 @@ export default function PlannerFio() {
 function HomeView({ motivation, aiLoading, onRefresh, weekProgress, todayIdx, setActiveDay, setView, totalDaysActive, photosDue, getDayData, updateDay }) {
   const today = getDayData(todayIdx);
   const sched = TRAINING_SCHEDULE[todayIdx];
-
   return (
     <div>
       <div style={{ padding:"32px 20px 20px", background:"linear-gradient(180deg,rgba(138,43,226,0.18) 0%,transparent 100%)", textAlign:"center" }}>
@@ -164,18 +218,14 @@ function HomeView({ motivation, aiLoading, onRefresh, weekProgress, todayIdx, se
         <h1 style={{ margin:0, fontSize:30, fontWeight:700, color:"#f0e6ff", letterSpacing:-1 }}>✨ Mundo Fio</h1>
         <div style={{ marginTop:8, fontSize:12, color:"#a78bfa" }}>{new Date().toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
-
       <div style={{ margin:"0 16px 16px" }}>
         <div style={{ padding:"18px 16px", borderRadius:16, background:"linear-gradient(135deg,rgba(192,132,252,0.15),rgba(244,114,182,0.1))", border:"1px solid rgba(192,132,252,0.3)", position:"relative" }}>
           <div style={{ fontSize:11, color:"#f472b6", letterSpacing:3, textTransform:"uppercase", marginBottom:8 }}>💬 Para vos hoy</div>
-          {aiLoading
-            ? <div style={{ color:"#a78bfa", fontSize:14, fontStyle:"italic" }}>Generando tu mensaje del día...</div>
-            : <div style={{ fontSize:15, color:"#f0e6ff", lineHeight:1.7, fontStyle:"italic" }}>{motivation.msg || "Cargando..."}</div>
-          }
+          {aiLoading ? <div style={{ color:"#a78bfa", fontSize:14, fontStyle:"italic" }}>Generando tu mensaje del día...</div>
+            : <div style={{ fontSize:15, color:"#f0e6ff", lineHeight:1.7, fontStyle:"italic" }}>{motivation.msg || "Cargando..."}</div>}
           <button onClick={onRefresh} style={{ position:"absolute", top:12, right:12, background:"none", border:"none", color:"#7c3aed", cursor:"pointer", fontSize:16 }}>↺</button>
         </div>
       </div>
-
       <div style={{ display:"flex", gap:10, margin:"0 16px 16px" }}>
         {[{label:"Días activos",val:totalDaysActive,emoji:"🔥"},{label:"Esta semana",val:`${weekProgress.filter(p=>p>0).length}/7`,emoji:"📅"},{label:"Hoy",val:`${Math.round((weekProgress[todayIdx]||0)*100)}%`,emoji:"⚡"}].map(s => (
           <div key={s.label} style={{ flex:1, background:"rgba(255,255,255,0.04)", borderRadius:12, padding:"12px 8px", textAlign:"center", border:"1px solid rgba(200,160,255,0.1)" }}>
@@ -185,7 +235,6 @@ function HomeView({ motivation, aiLoading, onRefresh, weekProgress, todayIdx, se
           </div>
         ))}
       </div>
-
       {photosDue && (
         <div style={{ margin:"0 16px 16px" }} onClick={() => setView("fotos")}>
           <div style={{ padding:"14px 16px", borderRadius:14, background:"rgba(244,114,182,0.12)", border:"1px solid rgba(244,114,182,0.35)", cursor:"pointer", display:"flex", alignItems:"center", gap:12 }}>
@@ -197,7 +246,6 @@ function HomeView({ motivation, aiLoading, onRefresh, weekProgress, todayIdx, se
           </div>
         </div>
       )}
-
       <div style={{ margin:"0 16px 16px" }}>
         <div style={{ fontSize:13, color:"#c084fc", letterSpacing:2, textTransform:"uppercase", marginBottom:10 }}>Hoy — {FULL_DAYS[todayIdx]}</div>
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
@@ -208,11 +256,8 @@ function HomeView({ motivation, aiLoading, onRefresh, weekProgress, todayIdx, se
           <QuickCheck emoji="📖" label="Estudio idóneo" done={today.blocks.idoneo.done} onToggle={() => updateDay(todayIdx, d => ({...d, blocks:{...d.blocks, idoneo:{...d.blocks.idoneo, done:!d.blocks.idoneo.done}}}))} />
           <QuickCheck emoji="🧹" label="Limpieza" done={today.blocks.limpieza.done} onToggle={() => updateDay(todayIdx, d => ({...d, blocks:{...d.blocks, limpieza:{...d.blocks.limpieza, done:!d.blocks.limpieza.done}}}))} />
         </div>
-        <button onClick={() => setView("planner")} style={{ marginTop:12, width:"100%", padding:"12px", borderRadius:12, background:"rgba(124,58,237,0.2)", border:"1px solid rgba(124,58,237,0.4)", color:"#c084fc", fontSize:13, cursor:"pointer", letterSpacing:1 }}>
-          Ver planner completo →
-        </button>
+        <button onClick={() => setView("planner")} style={{ marginTop:12, width:"100%", padding:"12px", borderRadius:12, background:"rgba(124,58,237,0.2)", border:"1px solid rgba(124,58,237,0.4)", color:"#c084fc", fontSize:13, cursor:"pointer", letterSpacing:1 }}>Ver planner completo →</button>
       </div>
-
       <div style={{ margin:"0 16px 20px" }}>
         <div style={{ fontSize:13, color:"#c084fc", letterSpacing:2, textTransform:"uppercase", marginBottom:10 }}>Semana</div>
         <div style={{ display:"flex", gap:6 }}>
@@ -287,11 +332,9 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
           <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
             {!sched.fuerza && !sched.cardio && !sched.yoga
               ? <div style={{ textAlign:"center", padding:"40px 0", color:"#7c3aed" }}>🌙 Día de descanso activo.</div>
-              : <>
-                {sched.fuerza && <TrainingCard emoji="🏋️" label="Fuerza" done={day.training.fuerzaDone} notes={day.training.fuerzaNotes} onToggle={() => setTraining("fuerzaDone",!day.training.fuerzaDone)} onNotes={v => setTraining("fuerzaNotes",v)} color="#c084fc" />}
+              : <>{sched.fuerza && <TrainingCard emoji="🏋️" label="Fuerza" done={day.training.fuerzaDone} notes={day.training.fuerzaNotes} onToggle={() => setTraining("fuerzaDone",!day.training.fuerzaDone)} onNotes={v => setTraining("fuerzaNotes",v)} color="#c084fc" />}
                 {sched.cardio && <TrainingCard emoji="🏃" label="Cardio" done={day.training.cardioDone} notes={day.training.cardioNotes} onToggle={() => setTraining("cardioDone",!day.training.cardioDone)} onNotes={v => setTraining("cardioNotes",v)} color="#f472b6" />}
-                {sched.yoga && <TrainingCard emoji="🧘" label="Yoga" done={day.training.yogaDone} notes={day.training.yogaNotes} onToggle={() => setTraining("yogaDone",!day.training.yogaDone)} onNotes={v => setTraining("yogaNotes",v)} color="#818cf8" />}
-              </>
+                {sched.yoga && <TrainingCard emoji="🧘" label="Yoga" done={day.training.yogaDone} notes={day.training.yogaNotes} onToggle={() => setTraining("yogaDone",!day.training.yogaDone)} onNotes={v => setTraining("yogaNotes",v)} color="#818cf8" />}</>
             }
           </div>
         )}
@@ -348,26 +391,36 @@ function PlannerView({ activeDay, setActiveDay, todayIdx, weekProgress, getDayDa
 }
 
 // ─── MEDIDAS ──────────────────────────────────────────────────────────────────
-function MedidasView({ measures, saveMeasures, setView }) {
-  const [form, setForm] = useState({ fecha:todayStr(), cintura:"", cadera:"", bajo_vientre:"", pierna_der:"", pierna_izq:"", notas:"" });
+function MedidasView({ measures, saveMeasure, deleteMeasure, setView }) {
+  const emptyForm = { fecha:todayStr(), peso:"", cintura:"", cadera:"", bajo_vientre:"", pierna_der:"", pierna_izq:"", notas:"" };
+  const [form, setForm] = useState(emptyForm);
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
   const [chartMetric, setChartMetric] = useState("cintura");
+  const [saving, setSaving] = useState(false);
 
   const fields = [
-    {k:"cintura",l:"Cintura (cm)",e:"📏"},
-    {k:"cadera",l:"Cadera (cm)",e:"📐"},
-    {k:"bajo_vientre",l:"Bajo vientre (cm)",e:"🎯"},
-    {k:"pierna_der",l:"Pierna der. (cm)",e:"🦵"},
-    {k:"pierna_izq",l:"Pierna izq. (cm)",e:"🦵"},
+    {k:"peso",l:"Peso",u:"kg",e:"⚖️"},
+    {k:"cintura",l:"Cintura",u:"cm",e:"📏"},
+    {k:"cadera",l:"Cadera",u:"cm",e:"📐"},
+    {k:"bajo_vientre",l:"Bajo vientre",u:"cm",e:"🎯"},
+    {k:"pierna_der",l:"Pierna der.",u:"cm",e:"🦵"},
+    {k:"pierna_izq",l:"Pierna izq.",u:"cm",e:"🦵"},
   ];
 
-  const addEntry = () => {
-    if (!Object.values(form).some((v,i) => i > 0 && i < 6 && v)) return;
-    const entry = { ...form, id: Date.now() };
-    const updated = [...measures, entry].sort((a,b) => a.fecha.localeCompare(b.fecha));
-    saveMeasures(updated);
-    setShowForm(false);
-    setForm({ fecha:todayStr(), cintura:"", cadera:"", bajo_vientre:"", pierna_der:"", pierna_izq:"", notas:"" });
+  const startEdit = (m) => {
+    setForm({ fecha:m.fecha, peso:m.peso||"", cintura:m.cintura||"", cadera:m.cadera||"", bajo_vientre:m.bajo_vientre||"", pierna_der:m.pierna_der||"", pierna_izq:m.pierna_izq||"", notas:m.notas||"" });
+    setEditingId(m.id); setShowForm(true); setConfirmDelete(null);
+  };
+  const cancelForm = () => { setShowForm(false); setEditingId(null); setForm(emptyForm); };
+
+  const handleSave = async () => {
+    if (!fields.some(f => form[f.k])) return;
+    setSaving(true);
+    await saveMeasure(form, editingId);
+    setSaving(false);
+    cancelForm();
   };
 
   const chartData = measures.filter(m => m[chartMetric]).map(m => ({ date:fmtDate(m.fecha), val:parseFloat(m[chartMetric]) }));
@@ -385,54 +438,34 @@ function MedidasView({ measures, saveMeasures, setView }) {
         <div style={{ fontSize:12, color:"#a78bfa", marginBottom:16, lineHeight:1.7, background:"rgba(192,132,252,0.06)", borderRadius:12, padding:"12px 14px", border:"1px solid rgba(192,132,252,0.15)" }}>
           🌱 El foco acá está en ver cómo <strong style={{color:"#c084fc"}}>tu cuerpo se va transformando con el movimiento</strong>. Las medidas son un registro de tu proceso, no una evaluación.
         </div>
-
         {chartData.length > 1 && (
           <Card>
             <div style={{ fontSize:13, color:"#c084fc", fontWeight:600, marginBottom:8 }}>📈 Tu evolución</div>
             <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:12 }}>
-              {fields.map(f => (
-                <button key={f.k} onClick={() => setChartMetric(f.k)} style={{ padding:"4px 10px", borderRadius:20, fontSize:11, cursor:"pointer", border:"none", background:chartMetric===f.k?"#7c3aed":"rgba(255,255,255,0.06)", color:chartMetric===f.k?"white":"#a78bfa" }}>{f.e} {f.l.split(" ")[0]}</button>
-              ))}
+              {fields.map(f => (<button key={f.k} onClick={() => setChartMetric(f.k)} style={{ padding:"4px 10px", borderRadius:20, fontSize:11, cursor:"pointer", border:"none", background:chartMetric===f.k?"#7c3aed":"rgba(255,255,255,0.06)", color:chartMetric===f.k?"white":"#a78bfa" }}>{f.e} {f.l}</button>))}
             </div>
             <svg viewBox="0 0 300 100" style={{ width:"100%", height:100 }}>
-              <defs>
-                <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#c084fc" stopOpacity="0.3"/>
-                  <stop offset="100%" stopColor="#c084fc" stopOpacity="0"/>
-                </linearGradient>
-              </defs>
+              <defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#c084fc" stopOpacity="0.3"/><stop offset="100%" stopColor="#c084fc" stopOpacity="0"/></linearGradient></defs>
               {chartData.length > 1 && (() => {
-                const pts = chartData.map((d,i) => { const x = 10+(i/(chartData.length-1))*280; const y = 85-((d.val-minVal)/range)*70; return `${x},${y}`; });
-                const ptsStr = pts.join(" ");
-                const firstX = pts[0].split(",")[0]; const lastX = pts[pts.length-1].split(",")[0];
-                return (<>
-                  <path d={`M ${ptsStr}`} fill="none" stroke="#c084fc" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                  <path d={`M ${pts[0]} L ${ptsStr} L ${lastX},90 L ${firstX},90 Z`} fill="url(#grad)"/>
-                  {chartData.map((d,i) => { const x=10+(i/(chartData.length-1))*280; const y=85-((d.val-minVal)/range)*70; return <circle key={i} cx={x} cy={y} r="3" fill="#c084fc"/>; })}
-                </>);
+                const pts = chartData.map((d,i) => { const x=10+(i/(chartData.length-1))*280; const y=85-((d.val-minVal)/range)*70; return `${x},${y}`; });
+                const ptsStr = pts.join(" "); const firstX=pts[0].split(",")[0]; const lastX=pts[pts.length-1].split(",")[0];
+                return (<><path d={`M ${ptsStr}`} fill="none" stroke="#c084fc" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d={`M ${pts[0]} L ${ptsStr} L ${lastX},90 L ${firstX},90 Z`} fill="url(#grad)"/>{chartData.map((d,i) => { const x=10+(i/(chartData.length-1))*280; const y=85-((d.val-minVal)/range)*70; return <circle key={i} cx={x} cy={y} r="3" fill="#c084fc"/>; })}</>);
               })()}
             </svg>
             <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"#6d28d9", marginTop:4 }}>
-              {chartData[0] && <span>{chartData[0].date}</span>}
-              {chartData.length > 1 && <span>{chartData[chartData.length-1].date}</span>}
+              {chartData[0] && <span>{chartData[0].date}</span>}{chartData.length > 1 && <span>{chartData[chartData.length-1].date}</span>}
             </div>
-            {chartData.length >= 2 && (() => {
-              const first = chartData[0].val, last = chartData[chartData.length-1].val, diff = last - first;
-              return <div style={{ marginTop:8, fontSize:12, color:diff<0?"#4ade80":diff>0?"#f472b6":"#a78bfa", textAlign:"center" }}>
-                {diff===0?"Sin cambios aún — la constancia se acumula.":diff<0?`↓ ${Math.abs(diff).toFixed(1)} cm menos desde el inicio 💪`:`↑ ${diff.toFixed(1)} cm desde el inicio`}
-              </div>;
-            })()}
+            {chartData.length >= 2 && (() => { const first=chartData[0].val, last=chartData[chartData.length-1].val, diff=last-first; return <div style={{ marginTop:8, fontSize:12, color:diff<0?"#4ade80":diff>0?"#f472b6":"#a78bfa", textAlign:"center" }}>{diff===0?"Sin cambios aún — la constancia se acumula.":diff<0?`↓ ${Math.abs(diff).toFixed(1)} menos desde el inicio 💪`:`↑ ${diff.toFixed(1)} desde el inicio`}</div>; })()}
           </Card>
         )}
-
         {!showForm
-          ? <button onClick={() => setShowForm(true)} style={{ width:"100%", padding:"14px", borderRadius:14, margin:"0 0 12px", background:"rgba(124,58,237,0.2)", border:"1px solid rgba(124,58,237,0.4)", color:"#c084fc", fontSize:14, cursor:"pointer", fontWeight:600 }}>+ Registrar medidas de hoy</button>
+          ? <button onClick={() => { setShowForm(true); setEditingId(null); setForm(emptyForm); }} style={{ width:"100%", padding:"14px", borderRadius:14, margin:"0 0 12px", background:"rgba(124,58,237,0.2)", border:"1px solid rgba(124,58,237,0.4)", color:"#c084fc", fontSize:14, cursor:"pointer", fontWeight:600 }}>+ Registrar medidas de hoy</button>
           : <Card>
-              <div style={{ fontSize:13, color:"#c084fc", fontWeight:600, marginBottom:12 }}>📝 Nuevo registro</div>
+              <div style={{ fontSize:13, color:"#c084fc", fontWeight:600, marginBottom:12 }}>{editingId ? "✏️ Editando registro" : "📝 Nuevo registro"}</div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
-                {fields.map(({k,l,e}) => (
+                {fields.map(({k,l,u,e}) => (
                   <div key={k}>
-                    <div style={{ fontSize:11, color:"#a78bfa", marginBottom:4 }}>{e} {l}</div>
+                    <div style={{ fontSize:11, color:"#a78bfa", marginBottom:4 }}>{e} {l} <span style={{color:"#6d28d9"}}>({u})</span></div>
                     <input type="number" value={form[k]} onChange={ev => setForm(f=>({...f,[k]:ev.target.value}))} placeholder="—" style={{ width:"100%", background:"rgba(255,255,255,0.06)", border:"1px solid rgba(200,160,255,0.2)", borderRadius:8, padding:"8px 10px", color:"#f0e6ff", fontSize:13, outline:"none", boxSizing:"border-box" }} />
                   </div>
                 ))}
@@ -443,21 +476,38 @@ function MedidasView({ measures, saveMeasures, setView }) {
               </div>
               <Textarea value={form.notas} onChange={v => setForm(f=>({...f,notas:v}))} placeholder="Notas opcionales..." rows={2} />
               <div style={{ display:"flex", gap:8, marginTop:12 }}>
-                <button onClick={addEntry} style={{ flex:1, padding:"10px", borderRadius:10, background:"#7c3aed", border:"none", color:"white", fontSize:13, cursor:"pointer", fontWeight:600 }}>Guardar</button>
-                <button onClick={() => setShowForm(false)} style={{ flex:1, padding:"10px", borderRadius:10, background:"rgba(255,255,255,0.06)", border:"none", color:"#a78bfa", fontSize:13, cursor:"pointer" }}>Cancelar</button>
+                <button onClick={handleSave} disabled={saving} style={{ flex:1, padding:"10px", borderRadius:10, background:"#7c3aed", border:"none", color:"white", fontSize:13, cursor:"pointer", fontWeight:600, opacity:saving?0.6:1 }}>{saving?"Guardando...":"Guardar"}</button>
+                <button onClick={cancelForm} style={{ flex:1, padding:"10px", borderRadius:10, background:"rgba(255,255,255,0.06)", border:"none", color:"#a78bfa", fontSize:13, cursor:"pointer" }}>Cancelar</button>
               </div>
             </Card>
         }
-
         {measures.length > 0 && (
           <div>
             <div style={{ fontSize:13, color:"#c084fc", letterSpacing:2, textTransform:"uppercase", marginBottom:10 }}>Historial</div>
             {[...measures].reverse().map(m => (
               <div key={m.id} style={{ background:"rgba(255,255,255,0.03)", borderRadius:12, padding:"12px 14px", marginBottom:8, border:"1px solid rgba(200,160,255,0.08)" }}>
-                <div style={{ fontSize:12, color:"#c084fc", fontWeight:600, marginBottom:6 }}>{fmtDate(m.fecha)}</div>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                  <div style={{ fontSize:12, color:"#c084fc", fontWeight:600 }}>{fmtDate(m.fecha)}</div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={() => startEdit(m)} style={{ background:"rgba(192,132,252,0.15)", border:"1px solid rgba(192,132,252,0.3)", borderRadius:8, padding:"4px 10px", color:"#c084fc", fontSize:11, cursor:"pointer" }}>✏️ Editar</button>
+                    <button onClick={() => setConfirmDelete(m.id)} style={{ background:"rgba(244,63,94,0.1)", border:"1px solid rgba(244,63,94,0.25)", borderRadius:8, padding:"4px 10px", color:"#fb7185", fontSize:11, cursor:"pointer" }}>🗑️ Borrar</button>
+                  </div>
+                </div>
+                {confirmDelete === m.id && (
+                  <div style={{ background:"rgba(244,63,94,0.1)", border:"1px solid rgba(244,63,94,0.3)", borderRadius:10, padding:"10px 12px", marginBottom:8, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                    <span style={{ fontSize:12, color:"#fda4af" }}>¿Segura que querés borrar?</span>
+                    <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                      <button onClick={() => { deleteMeasure(m.id); setConfirmDelete(null); }} style={{ background:"#be123c", border:"none", borderRadius:8, padding:"5px 12px", color:"white", fontSize:12, cursor:"pointer", fontWeight:600 }}>Sí</button>
+                      <button onClick={() => setConfirmDelete(null)} style={{ background:"rgba(255,255,255,0.06)", border:"none", borderRadius:8, padding:"5px 12px", color:"#a78bfa", fontSize:12, cursor:"pointer" }}>No</button>
+                    </div>
+                  </div>
+                )}
                 <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
-                  {fields.filter(f=>m[f.k]).map(({k,l,e}) => (
-                    <span key={k} style={{ fontSize:12, color:"#e9d5ff", background:"rgba(255,255,255,0.05)", borderRadius:8, padding:"3px 8px" }}>{e} {parseFloat(m[k])} cm</span>
+                  {fields.filter(f=>m[f.k]).map(({k,l,u,e}) => (
+                    <div key={k} style={{ background:"rgba(255,255,255,0.05)", borderRadius:10, padding:"5px 10px", display:"flex", flexDirection:"column", alignItems:"center", minWidth:72 }}>
+                      <span style={{ fontSize:10, color:"#a78bfa", marginBottom:2 }}>{e} {l}</span>
+                      <span style={{ fontSize:14, color:"#f0e6ff", fontWeight:600 }}>{parseFloat(m[k])} <span style={{ fontSize:10, color:"#7c3aed" }}>{u}</span></span>
+                    </div>
                   ))}
                 </div>
                 {m.notas && <div style={{ fontSize:11, color:"#7c3aed", marginTop:6 }}>{m.notas}</div>}
@@ -475,14 +525,12 @@ function FotosView({ photoLog, savePhotoLog, photosDue, setView }) {
   const [newNote, setNewNote] = useState("");
   const daysSince = photoLog.lastReminder ? Math.floor(daysBetween(photoLog.lastReminder, todayStr())) : null;
   const nextIn = photoLog.lastReminder ? Math.max(0, 15 - daysSince) : 0;
-
   const markPhotoDone = () => savePhotoLog({ ...photoLog, lastReminder: todayStr() });
   const addNote = () => {
     if (!newNote.trim()) return;
     savePhotoLog({ ...photoLog, notes: [...(photoLog.notes||[]), { text:newNote.trim(), date:todayStr(), id:Date.now() }] });
     setNewNote("");
   };
-
   return (
     <div>
       <div style={{ padding:"24px 16px 12px", display:"flex", alignItems:"center", gap:12 }}>
@@ -497,10 +545,7 @@ function FotosView({ photoLog, savePhotoLog, photosDue, setView }) {
               <>
                 <div style={{ fontSize:16, fontWeight:700, color:"#f472b6", marginBottom:6 }}>¡Es momento de tu foto de progreso!</div>
                 <div style={{ fontSize:13, color:"#fda4af", marginBottom:16, lineHeight:1.6 }}>Cada foto es evidencia de tu constancia. No tiene que ser perfecta — tiene que ser real.</div>
-                <div style={{ fontSize:12, color:"#a78bfa", marginBottom:16, textAlign:"left", background:"rgba(255,255,255,0.04)", borderRadius:10, padding:"10px 12px" }}>
-                  📋 <strong>Tips para que la comparación sea justa:</strong><br/>
-                  misma ropa · misma hora · misma luz · mismo ángulo
-                </div>
+                <div style={{ fontSize:12, color:"#a78bfa", marginBottom:16, textAlign:"left", background:"rgba(255,255,255,0.04)", borderRadius:10, padding:"10px 12px" }}>📋 <strong>Tips:</strong> misma ropa · misma hora · misma luz · mismo ángulo</div>
                 <button onClick={markPhotoDone} style={{ width:"100%", padding:"14px", borderRadius:14, background:"linear-gradient(135deg,#7c3aed,#ec4899)", border:"none", color:"white", fontSize:14, cursor:"pointer", fontWeight:700 }}>✓ Saqué mi foto de hoy</button>
               </>
             ) : (
@@ -516,7 +561,6 @@ function FotosView({ photoLog, savePhotoLog, photosDue, setView }) {
             )}
           </div>
         </Card>
-
         <Card>
           <div style={{ fontSize:13, color:"#c084fc", fontWeight:600, marginBottom:6 }}>📝 ¿Cómo te sentís en tu cuerpo?</div>
           <div style={{ fontSize:12, color:"#7c3aed", marginBottom:10 }}>Anotá qué notás, qué cambió, cómo te movés...</div>
@@ -532,7 +576,6 @@ function FotosView({ photoLog, savePhotoLog, photosDue, setView }) {
             </div>
           ))}
         </Card>
-
         <Card>
           <div style={{ fontSize:13, color:"#818cf8", fontWeight:600, marginBottom:10 }}>📱 Cómo guardar tus fotos</div>
           <div style={{ fontSize:12, color:"#a78bfa", lineHeight:1.9 }}>
